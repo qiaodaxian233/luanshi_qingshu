@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🎭 乔大仙 · 全能助手(项目联动版)
 // @namespace    luanshi_qingshu
-// @version      6.1.0
-// @description  v6.1.0:配置导入/导出(整体备份+跨设备同步) / v6.0.2:上传的TXT剧本也作为附件传给GPT / v6.0.1:项目tab风格提示词支持自定义 / v6.0:TXT剧本→自动提取人名→匹配角色图+提示词,一键应用
+// @version      6.2.0
+// @description  v6.2.0:剧本自动分段(目标字数浮动+前情提要+场景识别) / v6.1.0:配置导入/导出 / v6.0.2:TXT附件 / v6.0.1:自定义风格 / v6.0:TXT剧本→人名→角色图
 // @author       乱世情书 Project
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -55,6 +55,13 @@
     // ★ v6.0.2 新增
     projectAttachScript: true,    // 应用时是否把 TXT 作为附件上传给 GPT
     projectScriptFileName: '',    // 上传的 TXT 文件名(用于重建 File)
+
+    // ── ★ v6.2.0 剧本分段 ──
+    projectSegments: [],          // [{text, recap, index, total, scene, charCount}]
+    projectCurrentSegIdx: 0,      // 当前激活的段索引
+    projectTargetLen: 1000,       // 目标字数
+    projectOverlapChars: 80,      // 前情提要字数
+    projectShowSegPanel: true,    // 是否展开分段面板
   };
   let S = Object.assign({}, DEFAULT, GM_getValue(STORE_KEY, {}));
 
@@ -93,6 +100,13 @@
   // ── v6.0.2 字段补齐 ──
   if (typeof S.projectAttachScript !== 'boolean') S.projectAttachScript = true;
   if (typeof S.projectScriptFileName !== 'string') S.projectScriptFileName = '';
+
+  // ── v6.2.0 字段补齐 ──
+  if (!Array.isArray(S.projectSegments)) S.projectSegments = [];
+  if (typeof S.projectCurrentSegIdx !== 'number') S.projectCurrentSegIdx = 0;
+  if (typeof S.projectTargetLen !== 'number') S.projectTargetLen = 1000;
+  if (typeof S.projectOverlapChars !== 'number') S.projectOverlapChars = 80;
+  if (typeof S.projectShowSegPanel !== 'boolean') S.projectShowSegPanel = true;
 
   const save = () => GM_setValue(STORE_KEY, S);
   save();
@@ -810,6 +824,87 @@
       pointer-events:none; white-space:nowrap; box-shadow:0 4px 20px rgba(0,0,0,0.6);
     }
     #ls-toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+
+    /* ════════ ★ v6.2.0 分段面板 ════════ */
+    #ls-proj-seg-controls {
+      display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+      font-size:10px; color:var(--p-muted);
+    }
+    #ls-proj-seg-controls label { color:var(--p-muted); }
+    #ls-proj-target-len {
+      background:rgba(0,0,0,0.4); border:1px solid var(--p-border);
+      border-radius:4px; color:var(--p-text); font-size:11px;
+      font-family:'JetBrains Mono',monospace; padding:3px 6px;
+      width:60px; text-align:center; outline:none;
+    }
+    #ls-proj-target-len:focus { border-color:var(--p-gold); }
+
+    #ls-proj-seg-list {
+      display:flex; flex-direction:column; gap:4px;
+      max-height:240px; overflow-y:auto; padding:2px;
+      margin-top:6px;
+    }
+    #ls-proj-seg-list::-webkit-scrollbar { width:3px; }
+    #ls-proj-seg-list::-webkit-scrollbar-thumb { background:var(--p-border); border-radius:3px; }
+    .ls-proj-seg-item {
+      display:flex; align-items:flex-start; gap:7px; padding:7px 9px;
+      border-radius:5px; cursor:pointer; transition:all 0.14s;
+      background:rgba(0,0,0,0.3); border:1px solid rgba(180,130,80,0.1);
+      position:relative;
+    }
+    .ls-proj-seg-item:hover {
+      background:var(--p-glow); border-color:var(--p-border);
+    }
+    .ls-proj-seg-item.current {
+      background:linear-gradient(135deg, rgba(201,164,90,0.18) 0%, rgba(201,164,90,0.05) 100%);
+      border-color:var(--p-gold);
+      box-shadow:0 0 0 1px rgba(201,164,90,0.2);
+    }
+    .ls-proj-seg-num {
+      flex-shrink:0; width:28px; height:24px;
+      display:flex; align-items:center; justify-content:center;
+      background:rgba(0,0,0,0.5); border-radius:4px;
+      font-family:'JetBrains Mono',monospace; font-size:10.5px;
+      font-weight:700; color:var(--p-gold2);
+      border:1px solid rgba(201,164,90,0.2);
+    }
+    .ls-proj-seg-item.current .ls-proj-seg-num {
+      background:var(--p-gold); color:#0d0b0e;
+    }
+    .ls-proj-seg-main { flex:1; min-width:0; }
+    .ls-proj-seg-meta {
+      font-size:9.5px; color:var(--p-muted);
+      font-family:'JetBrains Mono',monospace;
+      display:flex; gap:8px; align-items:center; margin-bottom:3px;
+      flex-wrap:wrap;
+    }
+    .ls-proj-seg-meta .scene-tag {
+      color:var(--p-gold); padding:1px 5px;
+      background:rgba(201,164,90,0.1);
+      border-radius:3px; border:1px solid rgba(201,164,90,0.2);
+    }
+    .ls-proj-seg-meta .char-count { opacity:0.7; }
+    .ls-proj-seg-meta .char-count.short { color:var(--p-blue); }
+    .ls-proj-seg-meta .char-count.long { color:var(--p-red); }
+    .ls-proj-seg-preview {
+      font-size:10px; line-height:1.5; color:var(--p-text);
+      overflow:hidden; display:-webkit-box;
+      -webkit-line-clamp:2; -webkit-box-orient:vertical;
+    }
+    .ls-proj-seg-empty {
+      text-align:center; color:var(--p-muted);
+      font-size:10.5px; padding:18px 8px; line-height:1.6;
+    }
+    #ls-proj-seg-nav {
+      display:flex; gap:5px; margin-top:8px;
+    }
+    .ls-proj-seg-current-tag {
+      display:inline-flex; align-items:center; gap:4px;
+      padding:2px 7px; border-radius:10px;
+      background:rgba(201,164,90,0.15); border:1px solid var(--p-gold);
+      color:var(--p-gold2); font-size:10px;
+      font-family:'JetBrains Mono',monospace;
+    }
   `);
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -983,6 +1078,148 @@
     return hits;
   }
 
+  // ═══════════════════════════════════════════════════════════════════════
+  //   ★ v6.2.0 剧本自动分段
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // 主切分:章节 → 段落 → 句子
+  function splitScript(text, opts = {}) {
+    const TARGET  = opts.target  || 1000;
+    const MIN     = opts.min     || Math.floor(TARGET * 0.5);
+    const MAX     = opts.max     || Math.floor(TARGET * 1.6);
+    const OVERLAP = typeof opts.overlap === 'number' ? opts.overlap : 80;
+
+    if (!text || !text.trim()) return [];
+
+    const chapterRe = /(?=^第[一二三四五六七八九十百千零〇0-9]+[章节回卷部集篇])/m;
+    const chapters = text.split(chapterRe).map(s => s.trim()).filter(Boolean);
+    const blocks = chapters.length ? chapters : [text];
+
+    const rawSegs = [];
+
+    for (const block of blocks) {
+      const paras = block.split(/\n\s*\n+/).map(p => p.trim()).filter(Boolean);
+
+      let cur = '';
+      const flush = () => { if (cur) { rawSegs.push(cur); cur = ''; } };
+
+      for (const p of paras) {
+        if (p.length > MAX) {
+          flush();
+          rawSegs.push(...subdivide(p, TARGET, MAX));
+          continue;
+        }
+
+        const merged = cur ? (cur + '\n\n' + p) : p;
+
+        if (merged.length > MAX) {
+          if (cur && cur.length >= MIN) {
+            flush();
+            cur = p;
+          } else {
+            const distMerge = Math.abs(merged.length - TARGET);
+            const distSolo  = Math.abs((cur || p).length - TARGET);
+            if (distMerge <= distSolo && merged.length <= MAX * 1.1) {
+              cur = merged;
+              flush();
+            } else {
+              flush();
+              cur = p;
+            }
+          }
+        } else {
+          cur = merged;
+          if (cur.length >= TARGET) flush();
+        }
+      }
+      flush();
+    }
+
+    return rawSegs.map((segText, i) => {
+      const recap = (i > 0 && OVERLAP > 0)
+        ? extractRecap(rawSegs[i - 1], OVERLAP)
+        : '';
+      return {
+        text: segText,
+        recap,
+        index: i,
+        total: rawSegs.length,
+        scene: detectScene(segText),
+        charCount: segText.length,
+      };
+    });
+  }
+
+  function subdivide(longPara, target, max) {
+    const sentences = longPara.match(/[^。!??!\n]+(?:[。!??!]+|$)/g) || [longPara];
+    const out = [];
+    let cur = '';
+    for (const s of sentences) {
+      if (cur.length + s.length > max && cur) {
+        out.push(cur);
+        cur = s;
+      } else {
+        cur += s;
+      }
+      if (cur.length >= target && /[。!?!?]\s*$/.test(cur)) {
+        out.push(cur);
+        cur = '';
+      }
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+
+  function extractRecap(prevText, charLimit) {
+    if (!prevText || prevText.length <= charLimit) return prevText.trim();
+    const tailLen = Math.min(prevText.length, Math.floor(charLimit * 1.6));
+    const tail = prevText.slice(-tailLen);
+    const m = tail.match(/[。!?!?\n]\s*([\s\S]+)$/);
+    const recap = m ? m[1].trim() : tail.trim();
+    if (recap.length > charLimit * 1.5) {
+      const hardCut = recap.slice(-charLimit);
+      const m2 = hardCut.match(/[、,,。!?!?\n]\s*([\s\S]+)$/);
+      return (m2 ? m2[1] : hardCut).trim();
+    }
+    return recap;
+  }
+
+  function detectScene(text) {
+    const head = text.split('\n').slice(0, 3).join(' ').trim();
+    const m1 = head.match(/^([\u4e00-\u9fa5]{2,12}(?:[里中内外上下]|大厦|大楼|公司|学校|医院|餐厅|酒店|宿舍|教室|家|房|屋|店))[,,。]/);
+    if (m1) return m1[1];
+    const m2 = head.match(/^一[间座栋个]([\u4e00-\u9fa5]{2,10})[里中内]?[。,]/);
+    if (m2) return m2[1];
+    return null;
+  }
+
+  function recomputeSegments() {
+    if (!S.projectScript || !S.projectScript.trim()) {
+      S.projectSegments = [];
+      S.projectCurrentSegIdx = 0;
+      save();
+      return;
+    }
+    S.projectSegments = splitScript(S.projectScript, {
+      target: S.projectTargetLen,
+      overlap: S.projectOverlapChars,
+    });
+    if (S.projectCurrentSegIdx >= S.projectSegments.length) {
+      S.projectCurrentSegIdx = 0;
+    }
+    save();
+  }
+
+  function buildSegmentText(seg) {
+    if (!seg) return '';
+    const parts = [];
+    if (seg.scene) parts.push(`【当前场景】${seg.scene}`);
+    if (seg.recap) parts.push(`【前情提要(已绘制,无需重画)】\n${seg.recap}`);
+    parts.push(`【本段正文(请基于这部分生成分镜)】\n${seg.text}`);
+    parts.push(`\n──────\n本段:${seg.index + 1} / ${seg.total} · ${seg.charCount} 字`);
+    return parts.join('\n\n');
+  }
+
   function recomputeProjectMatches() {
     projectExtractedNames = extractNamesFromScript(S.projectScript || '').map(n => ({
       ...n,
@@ -1008,7 +1245,7 @@
     panel.innerHTML = `
       <div id="ls-header">
         <span class="ls-h-icon">🎭</span>
-        <span class="ls-h-title">乔大仙 · 全能助手<span class="ls-h-sub">  v6.1.0 · ALT+SHIFT+Q</span></span>
+        <span class="ls-h-title">乔大仙 · 全能助手<span class="ls-h-sub">  v6.2.0 · ALT+SHIFT+Q</span></span>
         <button id="ls-btn-min" title="最小化为圆形按钮">─</button>
       </div>
       <div id="ls-tabs">
@@ -1146,7 +1383,7 @@
           </div>
           <div class="ls-section">
             <div class="ls-section-title">📋 日志</div>
-            <div id="ls-log"><span class="ls-log-line info">· 全能助手 v6.1.0 已加载(配置导入导出)</span></div>
+            <div id="ls-log"><span class="ls-log-line info">· 全能助手 v6.2.0 已加载(剧本自动分段)</span></div>
           </div>
         </div>
       </div>
@@ -1198,7 +1435,7 @@
     `;
   }
 
-  // ★ v6.0.1 项目 PANE
+  // ★ v6.2.0 项目 PANE
   function projectPaneHTML() {
     return `
       <div id="ls-pane-project" class="ls-pane">
@@ -1218,6 +1455,28 @@
               <span>识别角色: <span class="num" id="ls-proj-namecount">0</span></span>
               <span>·</span>
               <span>命中角色图: <span class="num" id="ls-proj-hitcount">0</span></span>
+              <span>·</span>
+              <span>分段: <span class="num" id="ls-proj-segcount">0</span></span>
+            </div>
+          </div>
+
+          <div class="ls-section">
+            <div class="ls-section-title">📖 自动分段(v6.2.0)</div>
+            <div id="ls-proj-seg-controls">
+              <label>目标字数:</label>
+              <input id="ls-proj-target-len" type="number" min="300" max="3000" step="100" value="${S.projectTargetLen}" />
+              <button class="ls-btn" id="ls-btn-proj-resplit" style="flex:0 0 auto;padding:4px 10px;font-size:10px;">🔄 重新分段</button>
+              <span style="opacity:0.6;">·</span>
+              <span class="ls-proj-seg-current-tag" id="ls-proj-cur-tag" style="display:none;">
+                当前 <span id="ls-proj-cur-num">1/1</span>
+              </span>
+            </div>
+            <div id="ls-proj-seg-list"></div>
+            <div id="ls-proj-seg-nav" style="display:none;">
+              <button class="ls-btn" id="ls-btn-seg-prev" style="flex:0 0 auto;padding:5px 12px;">◀ 上一段</button>
+              <button class="ls-btn" id="ls-btn-seg-next" style="flex:0 0 auto;padding:5px 12px;">下一段 ▶</button>
+              <span style="flex:1;"></span>
+              <button class="ls-btn" id="ls-btn-seg-copy" style="flex:0 0 auto;padding:5px 10px;font-size:10px;" title="复制本段完整内容(含前情提要)">📋 复制本段</button>
             </div>
           </div>
 
@@ -1265,20 +1524,20 @@
               <input type="checkbox" id="ls-proj-attach-script" ${S.projectAttachScript ? 'checked' : ''} />
               <span class="ls-toggle-slider"></span>
             </label>
-            <span style="font-size:10px;color:var(--p-muted)">应用时同时把 TXT 作为附件传给 GPT <span id="ls-proj-attach-filename" style="color:var(--p-gold2);"></span></span>
+            <span style="font-size:10px;color:var(--p-muted)">应用时把<b style="color:var(--p-gold2);">当前段</b>(若有分段)作为附件传给 GPT <span id="ls-proj-attach-filename" style="color:var(--p-gold2);"></span></span>
           </div>
           <div class="ls-btn-row">
-            <button class="ls-btn primary" id="ls-btn-proj-apply">🚀 应用到 ChatGPT 输入框</button>
+            <button class="ls-btn primary" id="ls-btn-proj-apply">🚀 应用「当前段」到 ChatGPT</button>
           </div>
 
           <div class="ls-proj-tip">
-            <b>💡 项目工作流:</b><br>
-            1. 上传 TXT 剧本(或直接粘贴文本)<br>
-            2. 脚本自动提取人名,在角色库里匹配同名图<br>
-            3. 匹配上的图自动勾选,可手动取消<br>
-            4. 选风格模板;<b>v6.0.1</b> 起支持「✏ 编辑 / ＋ 新建」自己的风格(★ 标记为自定义)<br>
-            5. <b>v6.0.2</b> 起默认会把 TXT 一起作为附件传给 GPT(可在按钮上方关掉)<br>
-            6. 点「🚀 应用」= 角色图+TXT附加 + 提示词写入,检查后自己点发送
+            <b>💡 v6.2.0 分段工作流:</b><br>
+            1. 上传 TXT → 自动按目标字数分段(优先在段落/章节边界切)<br>
+            2. 每段会带<b>前情提要</b>(上一段末尾80字),保持上下文连贯<br>
+            3. 点段列表切换当前段(金边高亮)<br>
+            4. 「🚀 应用」只会发<b>当前段</b>的内容,逐段推进<br>
+            5. 出图后检查无误 → 「下一段 ▶」继续<br>
+            <b>⚠ 关键边界手动检查:</b>主角形象切换、场景大跨度变化处,务必看一眼分段是否落对位置
           </div>
 
           <div class="ls-section">
@@ -1843,7 +2102,7 @@
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  //   ★ v6.0.1 PROJECT 模块
+  //   ★ v6.2.0 PROJECT 模块
   // ═══════════════════════════════════════════════════════════════════════
   function bindProjectEvents(panel) {
     const scriptEl = panel.querySelector('#ls-proj-script');
@@ -1859,8 +2118,9 @@
       clearTimeout(typingTimer);
       typingTimer = setTimeout(() => {
         recomputeProjectMatches();
+        recomputeSegments();
         renderProjectAll();
-      }, 280);
+      }, 320);
     });
 
     // 上传 TXT
@@ -1874,14 +2134,17 @@
       try {
         const txt = await readFileAsText(f);
         S.projectScript = txt || '';
-        S.projectScriptFileName = f.name || 'script.txt';   // ★ 新增
+        S.projectScriptFileName = f.name || 'script.txt';
         scriptEl.value = S.projectScript;
+        S.projectCurrentSegIdx = 0;
         save();
         recomputeProjectMatches();
+        recomputeSegments();
         renderProjectAll();
-        updateAttachFilenameLabel();                         // ★ 新增
-        showToast(`✓ 已读取 ${f.name}(${(f.size/1024).toFixed(1)}KB)`);
-        addLog(`📥 项目剧本已加载:${f.name}`, 'ok');
+        updateAttachFilenameLabel();
+        const segCount = S.projectSegments.length;
+        showToast(`✓ 已读取 ${f.name},自动分成 ${segCount} 段`);
+        addLog(`📥 项目剧本已加载:${f.name},分 ${segCount} 段`, 'ok');
       } catch (e) {
         showToast('读取失败');
         addLog(`✗ 读取剧本失败:${e.message}`, 'err');
@@ -1895,13 +2158,15 @@
         const txt = await navigator.clipboard.readText();
         if (!txt) { showToast('剪贴板是空的'); return; }
         S.projectScript = txt;
-        S.projectScriptFileName = S.projectScriptFileName || 'pasted_script.txt';  // ★ 新增
+        S.projectScriptFileName = S.projectScriptFileName || 'pasted_script.txt';
         scriptEl.value = txt;
+        S.projectCurrentSegIdx = 0;
         save();
         recomputeProjectMatches();
+        recomputeSegments();
         renderProjectAll();
-        updateAttachFilenameLabel();                         // ★ 新增
-        showToast(`✓ 已粘贴 ${txt.length} 字`);
+        updateAttachFilenameLabel();
+        showToast(`✓ 已粘贴 ${txt.length} 字,分 ${S.projectSegments.length} 段`);
       } catch (e) {
         showToast('剪贴板读取失败,可能没有授权');
       }
@@ -1912,13 +2177,15 @@
       if (!S.projectScript) { showToast('剧本已是空的'); return; }
       if (!confirm('清空当前剧本和提取结果?')) return;
       S.projectScript = '';
-      S.projectScriptFileName = '';                          // ★ 新增
+      S.projectScriptFileName = '';
       scriptEl.value = '';
       projectExtractedNames = [];
       S.projectMatchedIds = [];
+      S.projectSegments = [];
+      S.projectCurrentSegIdx = 0;
       save();
       renderProjectAll();
-      updateAttachFilenameLabel();                           // ★ 新增
+      updateAttachFilenameLabel();
       showToast('已清空');
     };
 
@@ -1929,7 +2196,6 @@
       showToast(`✓ 重新匹配,命中 ${S.projectMatchedIds.length} 张`);
     };
 
-    // 全选命中
     panel.querySelector('#ls-btn-proj-sel-all-hit').onclick = () => {
       const allMatched = new Set();
       projectExtractedNames.forEach(n => n.matchedRoleIds.forEach(id => allMatched.add(id)));
@@ -1938,8 +2204,6 @@
       renderProjectMatchedGrid();
       renderProjectStats();
     };
-
-    // 全不选
     panel.querySelector('#ls-btn-proj-sel-none').onclick = () => {
       S.projectMatchedIds = [];
       save();
@@ -1947,33 +2211,68 @@
       renderProjectStats();
     };
 
+    // ── ★ v6.2.0 分段事件 ──
+    const targetLenEl = panel.querySelector('#ls-proj-target-len');
+    targetLenEl.addEventListener('change', () => {
+      const v = Math.max(300, Math.min(3000, parseInt(targetLenEl.value) || 1000));
+      targetLenEl.value = v;
+      S.projectTargetLen = v;
+      save();
+    });
+    panel.querySelector('#ls-btn-proj-resplit').onclick = () => {
+      if (!S.projectScript) { showToast('还没有剧本'); return; }
+      recomputeSegments();
+      renderProjectSegments();
+      renderProjectStats();
+      showToast(`✓ 重新分段,共 ${S.projectSegments.length} 段`);
+    };
+    panel.querySelector('#ls-btn-seg-prev').onclick = () => {
+      if (S.projectCurrentSegIdx > 0) {
+        S.projectCurrentSegIdx--;
+        save();
+        renderProjectSegments();
+      }
+    };
+    panel.querySelector('#ls-btn-seg-next').onclick = () => {
+      if (S.projectCurrentSegIdx < S.projectSegments.length - 1) {
+        S.projectCurrentSegIdx++;
+        save();
+        renderProjectSegments();
+      }
+    };
+    panel.querySelector('#ls-btn-seg-copy').onclick = () => {
+      const seg = S.projectSegments[S.projectCurrentSegIdx];
+      if (!seg) { showToast('当前没有分段'); return; }
+      const txt = buildSegmentText(seg);
+      navigator.clipboard.writeText(txt).then(
+        () => showToast(`✓ 已复制第 ${seg.index + 1}/${seg.total} 段(${txt.length} 字)`),
+        () => showToast('复制失败')
+      );
+    };
+
     // 风格选择
     styleSel.onchange = () => {
       S.projectStylePromptId = styleSel.value;
       save();
       renderProjectStylePreview();
-      // 切换风格后,刷新删除按钮的可用状态
       const cur = getStyleById(S.projectStylePromptId);
       const btnDel = document.getElementById('ls-btn-style-del');
       if (btnDel) btnDel.disabled = !cur || cur.builtin;
     };
 
-    // 额外提示词
     extraEl.addEventListener('input', () => {
       S.projectExtraPrompt = extraEl.value;
       save();
     });
 
-    // 一键应用
     panel.querySelector('#ls-btn-proj-apply').onclick = () => applyProject();
 
-    // ★ v6.0.1 自定义风格:编辑 / 新建 / 保存 / 取消 / 删除
+    // ── 自定义风格(原有逻辑) ──
     const editor   = panel.querySelector('#ls-proj-style-editor');
     const labelEl  = panel.querySelector('#ls-proj-style-label');
     const textEl   = panel.querySelector('#ls-proj-style-text');
 
     const openEditor = (mode) => {
-      // mode: 'edit' | 'new'
       editor.style.display = 'block';
       editor.dataset.mode = mode;
       delete editor.dataset.editId;
@@ -1985,7 +2284,6 @@
           return;
         }
         if (cur.builtin) {
-          // 内置不让原地改 → 自动转为「另存为新自定义」
           editor.dataset.mode = 'new';
           labelEl.value = cur.label + ' (副本)';
           textEl.value = cur.text;
@@ -2042,14 +2340,14 @@
       if (!cur || cur.builtin) { showToast('内置风格不可删'); return; }
       if (!confirm(`确认删除自定义风格「${cur.label}」?`)) return;
       S.projectStyles = S.projectStyles.filter(s => s.id !== cur.id);
-      S.projectStylePromptId = 'img_09'; // 回退到默认
+      S.projectStylePromptId = 'img_09';
       save();
       renderProjectStyleSelect();
       renderProjectStylePreview();
       showToast('已删除');
     };
 
-    // ★ v6.0.2 TXT 附件开关
+    // TXT 附件开关
     const attachChk = panel.querySelector('#ls-proj-attach-script');
     if (attachChk) {
       attachChk.onchange = e => {
@@ -2059,7 +2357,7 @@
     }
     updateAttachFilenameLabel();
 
-    // ═══ ★ v6.1.0 配置导入/导出 ═══
+    // ── 配置导入/导出(原有逻辑) ──
     const cfgFileInput = panel.querySelector('#ls-cfg-file');
 
     panel.querySelector('#ls-btn-cfg-export').onclick = () => {
@@ -2102,7 +2400,7 @@
     const exportData = {
       _meta: {
         app: '乔大仙·全能助手',
-        version: '6.1.0',
+        version: '6.2.0',
         exportedAt: new Date().toISOString(),
         includeRoleImages: !!includeRoleImages,
       },
@@ -2129,6 +2427,11 @@
       projectStyles:        S.projectStyles || [],
       projectAttachScript:  S.projectAttachScript,
       projectScriptFileName:S.projectScriptFileName || '',
+
+      // ★ v6.2.0 分段设置
+      projectTargetLen:    S.projectTargetLen,
+      projectOverlapChars: S.projectOverlapChars,
+      projectShowSegPanel: S.projectShowSegPanel,
 
       // UI 设置
       activeTab: S.activeTab,
@@ -2227,6 +2530,11 @@
       S.projectStyles = mergeArrayById(S.projectStyles, data.projectStyles);
     }
 
+    // ★ v6.2.0 分段设置
+    if (typeof data.projectTargetLen === 'number')    S.projectTargetLen = data.projectTargetLen;
+    if (typeof data.projectOverlapChars === 'number') S.projectOverlapChars = data.projectOverlapChars;
+    if (typeof data.projectShowSegPanel === 'boolean') S.projectShowSegPanel = data.projectShowSegPanel;
+
     // UI
     if (typeof data.activeTab === 'string') S.activeTab = data.activeTab;
 
@@ -2257,6 +2565,7 @@
     renderPromptList();
     renderRoleImage();
     recomputeProjectMatches();
+    recomputeSegments();
     renderProjectAll();
     updateAttachFilenameLabel();
 
@@ -2272,13 +2581,24 @@
       if (indexEl) indexEl.value = S.shotIndex || 1;
       const upPromptEl = document.getElementById('ls-upload-prompt');
       if (upPromptEl) upPromptEl.value = S.uploadPrompt || '';
+      const tlEl = document.getElementById('ls-proj-target-len');
+      if (tlEl) tlEl.value = S.projectTargetLen || 1000;
     }, 100);
   }
 
-  // ★ v6.0.2 显示当前会被附加的 TXT 文件名
+  // ★ v6.2.0 显示当前段信息
   function updateAttachFilenameLabel() {
     const lab = document.getElementById('ls-proj-attach-filename');
     if (!lab) return;
+    const segs = S.projectSegments || [];
+    if (segs.length > 0) {
+      const cur = segs[S.projectCurrentSegIdx];
+      if (cur) {
+        const baseName = S.projectScriptFileName || 'script.txt';
+        lab.textContent = `· ${baseName} 第${cur.index + 1}/${cur.total}段`;
+        return;
+      }
+    }
     if (S.projectScript && S.projectScriptFileName) {
       lab.textContent = `· ${S.projectScriptFileName}`;
     } else if (S.projectScript) {
@@ -2294,16 +2614,19 @@
     renderProjectMatchedGrid();
     renderProjectStyleSelect();
     renderProjectStylePreview();
+    renderProjectSegments();
   }
 
   function renderProjectStats() {
     const cl = document.getElementById('ls-proj-charlen');
     const nc = document.getElementById('ls-proj-namecount');
     const hc = document.getElementById('ls-proj-hitcount');
+    const sc = document.getElementById('ls-proj-segcount');
     const hcSub = document.getElementById('ls-proj-hit-count');
     if (cl) cl.textContent = (S.projectScript || '').length;
     if (nc) nc.textContent = projectExtractedNames.length;
     if (hc) hc.textContent = S.projectMatchedIds.length;
+    if (sc) sc.textContent = S.projectSegments.length;
     if (hcSub) hcSub.textContent = `(${S.projectMatchedIds.length})`;
   }
 
@@ -2411,6 +2734,75 @@
     box.textContent = p.text;
   }
 
+  function renderProjectSegments() {
+    const list = document.getElementById('ls-proj-seg-list');
+    const nav  = document.getElementById('ls-proj-seg-nav');
+    const tag  = document.getElementById('ls-proj-cur-tag');
+    const tagNum = document.getElementById('ls-proj-cur-num');
+    if (!list) return;
+
+    const segs = S.projectSegments || [];
+
+    if (!segs.length) {
+      list.innerHTML = `<div class="ls-proj-seg-empty">${
+        S.projectScript ? '点「🔄 重新分段」开始切分' : '上传或粘贴剧本后,会自动分段'
+      }</div>`;
+      if (nav) nav.style.display = 'none';
+      if (tag) tag.style.display = 'none';
+      return;
+    }
+
+    if (S.projectCurrentSegIdx >= segs.length) S.projectCurrentSegIdx = 0;
+
+    const TARGET = S.projectTargetLen;
+    list.innerHTML = segs.map((seg, i) => {
+      const isCur = i === S.projectCurrentSegIdx;
+      const preview = seg.text.replace(/\s+/g, ' ').slice(0, 80);
+      const charClass = seg.charCount < TARGET * 0.5 ? 'short'
+                      : seg.charCount > TARGET * 1.4 ? 'long'
+                      : '';
+      const sceneTag = seg.scene ? `<span class="scene-tag">📍${escHtml(seg.scene)}</span>` : '';
+      return `
+        <div class="ls-proj-seg-item ${isCur ? 'current' : ''}" data-idx="${i}">
+          <div class="ls-proj-seg-num">${i + 1}</div>
+          <div class="ls-proj-seg-main">
+            <div class="ls-proj-seg-meta">
+              <span class="char-count ${charClass}">${seg.charCount} 字</span>
+              ${sceneTag}
+              ${seg.recap ? `<span style="opacity:0.6;">⤴ 含前情提要</span>` : ''}
+            </div>
+            <div class="ls-proj-seg-preview">${escHtml(preview)}…</div>
+          </div>
+        </div>`;
+    }).join('');
+
+    list.querySelectorAll('.ls-proj-seg-item').forEach(el => {
+      el.onclick = () => {
+        S.projectCurrentSegIdx = parseInt(el.dataset.idx);
+        save();
+        renderProjectSegments();
+        updateAttachFilenameLabel();
+      };
+    });
+
+    const curEl = list.querySelector('.ls-proj-seg-item.current');
+    if (curEl) curEl.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
+
+    if (nav) nav.style.display = 'flex';
+    if (tag) {
+      tag.style.display = 'inline-flex';
+      tagNum.textContent = `${S.projectCurrentSegIdx + 1}/${segs.length}`;
+    }
+
+    const btnPrev = document.getElementById('ls-btn-seg-prev');
+    const btnNext = document.getElementById('ls-btn-seg-next');
+    if (btnPrev) btnPrev.disabled = S.projectCurrentSegIdx <= 0;
+    if (btnNext) btnNext.disabled = S.projectCurrentSegIdx >= segs.length - 1;
+
+    updateAttachFilenameLabel();
+  }
+
+
   // 拼装最终提示词:风格 + 项目额外
   function buildProjectFinalPrompt() {
     const style = getStyleById(S.projectStylePromptId);
@@ -2422,16 +2814,26 @@
   async function applyProject() {
     const ids = S.projectMatchedIds.slice();
     const finalPrompt = buildProjectFinalPrompt();
-    const willAttachScript = !!(S.projectAttachScript && S.projectScript && S.projectScript.trim());
+
+    // ★ v6.2.0:有分段就用当前段,否则用整篇
+    const segs = S.projectSegments || [];
+    const useSegment = segs.length > 0;
+    const curSeg = useSegment ? segs[S.projectCurrentSegIdx] : null;
+    const scriptForAttach = useSegment
+      ? buildSegmentText(curSeg)
+      : (S.projectScript || '');
+
+    const willAttachScript = !!(S.projectAttachScript && scriptForAttach && scriptForAttach.trim());
 
     if (!ids.length && !finalPrompt && !willAttachScript) {
-      showToast('既没勾选角色图、也没提示词、也没 TXT,无可应用');
+      showToast('既没勾选角色图、也没提示词、也没文本,无可应用');
       return;
     }
 
-    addLog(`🚀 项目应用 → 角色图 ${ids.length} 张 / 提示词 ${finalPrompt.length} 字 / TXT ${willAttachScript ? '附加' : '不附加'}`, 'info');
+    const segTag = useSegment ? `[第 ${curSeg.index + 1}/${curSeg.total} 段]` : '[整篇]';
+    addLog(`🚀 项目应用 ${segTag} → 角色图 ${ids.length} 张 / 提示词 ${finalPrompt.length} 字 / TXT ${willAttachScript ? `${scriptForAttach.length}字` : '不附'}`, 'info');
 
-    // 1) 准备所有要附加的文件:角色图 + (可选)TXT 剧本
+    // 1) 准备文件
     const files = [];
     try {
       for (const id of ids) {
@@ -2448,11 +2850,17 @@
 
     if (willAttachScript) {
       try {
-        const fname = (S.projectScriptFileName && S.projectScriptFileName.trim()) || 'script.txt';
-        // 加 BOM,避免 GPT 端读 UTF-8 中文 TXT 偶发乱码
-        const blob = new Blob(['\uFEFF' + S.projectScript], { type: 'text/plain;charset=utf-8' });
-        files.push(new File([blob], fname, { type: 'text/plain' }));
-        addLog(`📎 已准备 TXT 附件:${fname}(${(S.projectScript.length)} 字)`, 'info');
+        let baseName = (S.projectScriptFileName && S.projectScriptFileName.trim()) || 'script.txt';
+        if (useSegment) {
+          const dot = baseName.lastIndexOf('.');
+          const stem = dot > 0 ? baseName.slice(0, dot) : baseName;
+          const ext  = dot > 0 ? baseName.slice(dot) : '.txt';
+          const padded = String(curSeg.index + 1).padStart(2, '0');
+          baseName = `${stem}_第${padded}段_共${curSeg.total}段${ext}`;
+        }
+        const blob = new Blob(['\uFEFF' + scriptForAttach], { type: 'text/plain;charset=utf-8' });
+        files.push(new File([blob], baseName, { type: 'text/plain' }));
+        addLog(`📎 已准备 TXT 附件:${baseName}(${scriptForAttach.length} 字)`, 'info');
       } catch (e) {
         addLog(`✗ TXT 附件准备失败:${e.message}`, 'err');
       }
@@ -2471,7 +2879,7 @@
       }
     }
 
-    // 3) 写入提示词(强制 replace)
+    // 3) 写入提示词
     if (finalPrompt) {
       const prevMode = S.promptInsertMode;
       S.promptInsertMode = 'replace';
@@ -2480,8 +2888,11 @@
       save();
     }
 
-    showToast(`✓ 已就绪:${ids.length} 图${willAttachScript ? ' + TXT' : ''} + 提示词,检查后手动发送`);
-    addLog(`✓ 项目已应用,等你手动点发送`, 'ok');
+    const tip = useSegment
+      ? `✓ 第 ${curSeg.index + 1}/${curSeg.total} 段已就绪,检查后手动发送`
+      : `✓ 已就绪,检查后手动发送`;
+    showToast(tip);
+    addLog(`✓ ${segTag} 已应用,等你手动点发送`, 'ok');
   }
 
   // ─── 图片识别 / 下载 / 上传队列 ────────────────────────────────────
@@ -3053,6 +3464,7 @@
       buildPanel();
       // 项目模块首次匹配
       recomputeProjectMatches();
+      recomputeSegments();
       renderProjectAll();
       if (S.autoWatch) startWatcher();
       setTimeout(() => { try { fullScan(); } catch(e){} }, 1500);
