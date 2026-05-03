@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         🎭 乔大仙 · 全能助手(项目联动版)
 // @namespace    luanshi_qingshu
-// @version      6.2.0
-// @description  v6.2.0:剧本自动分段(目标字数浮动+前情提要+场景识别) / v6.1.0:配置导入/导出 / v6.0.2:TXT附件 / v6.0.1:自定义风格 / v6.0:TXT剧本→人名→角色图
+// @version      6.3.0
+// @description  v6.3.0:人名识别去噪+chip手动控制+严格匹配+角色别名 / v6.2.0:剧本自动分段(目标字数浮动+前情提要+场景识别) / v6.1.0:配置导入/导出 / v6.0.2:TXT附件 / v6.0.1:自定义风格 / v6.0:TXT剧本→人名→角色图
 // @author       乱世情书 Project
 // @match        https://chatgpt.com/*
 // @match        https://chat.openai.com/*
@@ -62,6 +62,13 @@
     projectTargetLen: 1000,       // 目标字数
     projectOverlapChars: 80,      // 前情提要字数
     projectShowSegPanel: true,    // 是否展开分段面板
+
+    // ── ★ v6.3.0 人名/匹配手动控制 ──
+    projectNameBlacklist: [],     // 永久拉黑的人名(下次分析也不再出现)
+    projectNameDisabled: [],      // 临时禁用的 chip(不参与图片匹配,重新分析会重置)
+    projectExcludedRoleIds: [],   // 永久排除自动匹配的角色图 id
+    projectManualRoleIds: [],     // 用户手动添加的角色图 id(独立于自动匹配)
+    projectMatchStrict: true,     // 严格匹配模式(默认开,关掉就回到 6.2 的双向 includes)
   };
   let S = Object.assign({}, DEFAULT, GM_getValue(STORE_KEY, {}));
 
@@ -107,6 +114,15 @@
   if (typeof S.projectTargetLen !== 'number') S.projectTargetLen = 1000;
   if (typeof S.projectOverlapChars !== 'number') S.projectOverlapChars = 80;
   if (typeof S.projectShowSegPanel !== 'boolean') S.projectShowSegPanel = true;
+
+  // ── v6.3.0 字段补齐 ──
+  if (!Array.isArray(S.projectNameBlacklist))   S.projectNameBlacklist   = [];
+  if (!Array.isArray(S.projectNameDisabled))    S.projectNameDisabled    = [];
+  if (!Array.isArray(S.projectExcludedRoleIds)) S.projectExcludedRoleIds = [];
+  if (!Array.isArray(S.projectManualRoleIds))   S.projectManualRoleIds   = [];
+  if (typeof S.projectMatchStrict !== 'boolean') S.projectMatchStrict    = true;
+  // 给老的角色图补 aliases 字段
+  S.roleImages.forEach(r => { if (!Array.isArray(r.aliases)) r.aliases = []; });
 
   const save = () => GM_setValue(STORE_KEY, S);
   save();
@@ -671,6 +687,7 @@
       color:var(--p-text); font-size:10.5px;
       font-family:'JetBrains Mono',monospace;
       cursor:pointer; transition:all 0.14s;
+      position:relative;
     }
     .ls-proj-name-chip:hover { border-color:var(--p-gold); }
     .ls-proj-name-chip.matched {
@@ -678,11 +695,63 @@
       border-color:var(--p-gold); color:var(--p-gold2);
     }
     .ls-proj-name-chip.unmatched { opacity:0.55; border-style:dashed; }
+    .ls-proj-name-chip.disabled {
+      opacity:0.35; border-style:dotted;
+      text-decoration:line-through;
+      filter:grayscale(0.7);
+    }
     .ls-proj-name-chip .chip-icon { font-size:10px; }
     .ls-proj-name-chip .chip-count {
       font-size:8.5px; opacity:0.7;
       padding:1px 4px; background:rgba(0,0,0,0.4);
       border-radius:6px;
+    }
+    .ls-proj-name-chip .chip-x {
+      display:none;
+      width:13px; height:13px; line-height:13px;
+      text-align:center; font-size:11px; font-weight:bold;
+      background:rgba(180,30,30,0.3); color:#ff8080;
+      border-radius:50%; margin-left:1px;
+      cursor:pointer; transition:all 0.12s;
+    }
+    .ls-proj-name-chip:hover .chip-x { display:inline-block; }
+    .ls-proj-name-chip .chip-x:hover {
+      background:rgba(220,40,40,0.7); color:#fff;
+    }
+    /* 拉黑名单显示行 */
+    #ls-proj-blacklist-row {
+      display:flex; flex-wrap:wrap; gap:4px;
+      margin-top:6px; padding:6px 8px;
+      background:rgba(80,30,30,0.15); border:1px dashed rgba(180,80,80,0.3);
+      border-radius:8px; font-size:9.5px;
+    }
+    #ls-proj-blacklist-row.empty { display:none; }
+    #ls-proj-blacklist-row .bl-label {
+      color:#cc7070; opacity:0.85; font-family:'JetBrains Mono',monospace;
+      letter-spacing:0.3px;
+    }
+    #ls-proj-blacklist-row .bl-chip,
+    #ls-proj-excluded-row .bl-chip {
+      display:inline-flex; align-items:center; gap:3px;
+      padding:1px 6px; border-radius:9px;
+      background:rgba(0,0,0,0.4); border:1px solid rgba(180,80,80,0.4);
+      color:#d09595; cursor:pointer; transition:all 0.12s;
+      font-family:'JetBrains Mono',monospace;
+      font-size:9.5px;
+    }
+    .bl-chip:hover { border-color:#ff9595; color:#fff; }
+    .bl-chip .bl-restore { font-size:9px; opacity:0.7; }
+    /* 永久排除的角色图行 */
+    #ls-proj-excluded-row {
+      display:flex; flex-wrap:wrap; gap:4px;
+      margin-top:6px; padding:6px 8px;
+      background:rgba(80,30,30,0.12); border:1px dashed rgba(180,80,80,0.25);
+      border-radius:8px;
+    }
+    #ls-proj-excluded-row.empty { display:none; }
+    #ls-proj-excluded-row .bl-label {
+      color:#cc7070; opacity:0.85; font-family:'JetBrains Mono',monospace;
+      letter-spacing:0.3px; font-size:9.5px;
     }
 
     #ls-proj-matched-grid {
@@ -715,6 +784,89 @@
       background:var(--p-gold); color:#0d0b0e;
       font-size:9px; font-weight:bold;
       display:flex; align-items:center; justify-content:center;
+    }
+    /* ★ v6.3.0 缩略图永久排除 × */
+    .ls-proj-mthumb-x {
+      position:absolute; top:2px; left:2px;
+      width:15px; height:15px; line-height:15px;
+      text-align:center; font-size:11px; font-weight:bold;
+      background:rgba(180,30,30,0.55); color:#fff;
+      border-radius:50%; cursor:pointer;
+      opacity:0; transition:opacity 0.12s, background 0.12s, transform 0.12s;
+      z-index:2;
+    }
+    .ls-proj-mthumb:hover .ls-proj-mthumb-x { opacity:1; }
+    .ls-proj-mthumb-x:hover {
+      background:rgba(220,40,40,0.95);
+      transform:scale(1.1);
+    }
+    /* ★ v6.3.0 通用模态遮罩(角色库手动选择 / 别名编辑) */
+    .ls-modal-overlay {
+      position:fixed; inset:0;
+      background:rgba(0,0,0,0.7); backdrop-filter:blur(2px);
+      z-index:2147483647;
+      display:flex; align-items:center; justify-content:center;
+      animation:lsFadeIn 0.18s ease;
+    }
+    @keyframes lsFadeIn { from { opacity:0 } to { opacity:1 } }
+    .ls-modal {
+      width:min(440px, calc(100vw - 32px));
+      max-height:80vh; overflow:hidden;
+      background:linear-gradient(160deg, #18141a 0%, #0e0c10 100%);
+      border:1px solid var(--p-gold); border-radius:10px;
+      box-shadow:0 20px 60px rgba(0,0,0,0.6), 0 0 0 1px rgba(201,164,90,0.1);
+      padding:16px; display:flex; flex-direction:column; gap:10px;
+      font-family:'Noto Serif SC', serif; color:var(--p-text);
+    }
+    .ls-modal-title {
+      font-size:14px; font-weight:bold;
+      color:var(--p-gold2); letter-spacing:1px;
+    }
+    .ls-modal-sub {
+      font-size:10px; color:var(--p-muted);
+      font-family:'JetBrains Mono', monospace;
+    }
+    .ls-modal-grid {
+      display:grid; grid-template-columns:repeat(4, 1fr); gap:6px;
+      max-height:50vh; overflow-y:auto;
+      padding:4px; background:rgba(0,0,0,0.3); border-radius:6px;
+    }
+    .ls-modal-grid::-webkit-scrollbar { width:4px; }
+    .ls-modal-grid::-webkit-scrollbar-thumb { background:var(--p-border); border-radius:3px; }
+    .ls-modal-actions {
+      display:flex; gap:8px; justify-content:flex-end;
+      padding-top:6px; border-top:1px solid var(--p-border);
+    }
+    .ls-modal input.ls-input,
+    .ls-modal textarea {
+      width:100%; box-sizing:border-box;
+      background:rgba(0,0,0,0.45); border:1px solid var(--p-border);
+      border-radius:5px; padding:7px 9px; color:var(--p-text);
+      font-size:11px; font-family:'JetBrains Mono', monospace; outline:none;
+    }
+    .ls-modal input.ls-input:focus,
+    .ls-modal textarea:focus { border-color:var(--p-gold); }
+    .ls-modal textarea { min-height:90px; resize:vertical; }
+    /* ★ v6.3.0 角色 thumb 上的 ✏ 编辑别名按钮 + 别名角标 */
+    .ls-role-thumb-edit {
+      position:absolute; top:3px; left:3px;
+      width:18px; height:18px; line-height:18px;
+      text-align:center; font-size:10px;
+      background:rgba(201,164,90,0.5); color:#fff;
+      border-radius:50%; cursor:pointer;
+      opacity:0; transition:opacity 0.12s, background 0.12s;
+      z-index:3;
+    }
+    .ls-role-thumb:hover .ls-role-thumb-edit { opacity:1; }
+    .ls-role-thumb-edit:hover { background:var(--p-gold); }
+    .ls-role-thumb-alias {
+      position:absolute; top:3px; right:3px;
+      padding:1px 5px; font-size:8px;
+      background:rgba(201,164,90,0.85); color:#0d0b0e;
+      border-radius:7px; font-weight:bold;
+      font-family:'JetBrains Mono', monospace;
+      pointer-events:none;
+      z-index:2;
     }
 
     #ls-proj-style-select {
@@ -972,7 +1124,8 @@
   const SURNAME_SET = new Set([...CN_SURNAMES]);
 
   // 不能出现在中文人名里的字(动词/虚词/形容词后缀等)。
-  const NAME_END_BLOCK = new Set([...'的地得了着过啊呢吧呀也是有在和与就只都还又再很太更最非已未常将刚才便又另而但因为所以然后于是看见说出听到想到觉得知道认为以为站坐走跑跳来去回到从向往对待让被把将给于以而且并且或者已经曾经正在准备打算决定开始结束完成发现遇到碰到注意发觉感觉觉醒醒过来转身回头抬头低头点头摇头握紧松开抓住拉住推开站立坐下起来放下拿起拿出穿上脱下戴上摘下笑哭怒喊叫骂闹想念思考考虑思索询问回答告诉解释强调突然忽然立刻马上瞬间一下顿时随即随后接着接下来继续不断渐渐慢慢逐渐悄悄默默静静轻轻重重狠狠死死紧紧深深浅浅快快慢慢急急匆匆没问的等说道']);
+  // ★ v6.3.0 扩充:补「屏住」「向前」「马上」「习惯」「解开」等高频误识别字
+  const NAME_END_BLOCK = new Set([...'的地得了着过啊呢吧呀也是有在和与就只都还又再很太更最非已未常将刚才便又另而但因为所以然后于是看见说出听到想到觉得知道认为以为站坐走跑跳来去回到从向往对待让被把将给于以而且并且或者已经曾经正在准备打算决定开始结束完成发现遇到碰到注意发觉感觉觉醒醒过来转身回头抬头低头点头摇头握紧松开抓住拉住推开站立坐下起来放下拿起拿出穿上脱下戴上摘下笑哭怒喊叫骂闹想念思考考虑思索询问回答告诉解释强调突然忽然立刻马上瞬间一下顿时随即随后接着接下来继续不断渐渐慢慢逐渐悄悄默默静静轻轻重重狠狠死死紧紧深深浅浅快快慢慢急急匆匆没问的等说道屏住呼吸住下进出上下里外左右前后东西南北高低快慢早晚多少远近真假新旧好坏强弱大小内外里头出来过去回来开始之后之前之中之间一直始终毕竟究竟到底固然虽然纵然即使纵使尽管不过然而但是只是若是要是如果倘若假如便是便有便能即可即将即时况且何况奈何无奈沉默良久许久半晌片刻同时同样几乎差点恐怕也许或许大约大概左右上下浑身满身遍体全身整个整张整片整段整夜整天浑然全然完全简直绝对必然必定肯定必须必要必需必会必须无须无需']);
 
   // 主入口:从剧本提取人名
   function extractNamesFromScript(text) {
@@ -1039,7 +1192,18 @@
         bestLen = len;
       }
       if (bestLen > 0) {
-        bump(text.slice(i, i + bestLen));
+        const picked = text.slice(i, i + bestLen);
+        bump(picked);
+        // ★ v6.3.0 前缀回扫:三/四字候选时,同时也 bump 两字前缀
+        // 这样"林渊屏住"在 NAME_END_BLOCK 没拦住"屏"时,至少"林渊"也有计数
+        // 后续去噪步骤会通过出现频次比较剔除三字误识别
+        if (bestLen >= 3) {
+          const prefix2 = text.slice(i, i + 2);
+          if (/^[\u4e00-\u9fa5]{2}$/.test(prefix2)
+              && !NAME_END_BLOCK.has(prefix2[1])) {
+            bump(prefix2);
+          }
+        }
         i += bestLen;
       } else {
         i++;
@@ -1053,26 +1217,91 @@
       bump(n);
     });
 
+    // ★ v6.3.0 去噪重排:
+    // 如果 "林渊屏" 与 "林渊" 同时存在,且前者出现次数 < 后者的 1/3,
+    // 视为前者是误识别(动词/状语贴在两字人名后面),剔除前者。
+    // 仅对中文 3-4 字名做此判断。
+    const allEntries = [...counter.entries()];
+    for (const [name, count] of allEntries) {
+      if (!/^[\u4e00-\u9fa5]{3,4}$/.test(name)) continue;
+      const prefix2 = name.slice(0, 2);
+      const prefixCount = counter.get(prefix2) || 0;
+      // 前缀两字也是合法人名(必须姓氏开头),且前缀出现频次更高
+      if (SURNAME_SET.has(prefix2[0])
+          && !NAME_END_BLOCK.has(prefix2[1])
+          && prefixCount >= 2
+          && count * 3 <= prefixCount) {
+        counter.delete(name);
+      }
+    }
+
     return [...counter.entries()]
       .sort((a, b) => b[1] - a[1])
       .map(([name, count]) => ({ name, count }));
   }
 
-  // 模糊匹配:把名字 → 角色库 id
+  // ★ v6.3.0 模糊匹配重写
+  //   1. 默认严格匹配:只在文件名清洗后==名字,或别名==名字时命中
+  //   2. 文件名里的"边界包夹":01_林渊_背面.png 也算严格命中(分隔符两侧)
+  //   3. 支持别名(r.aliases)
+  //   4. 永久排除的 id(S.projectExcludedRoleIds)不参与
+  //   5. 严格 0 命中时,做一次 fallback 单向包含,避免误伤
   function fuzzyMatchRoles(name) {
     if (!name || !S.roleImages.length) return [];
     const normName = name.toLowerCase().trim();
+    if (!normName) return [];
+    const excluded = new Set(S.projectExcludedRoleIds || []);
+    const strict = S.projectMatchStrict !== false;
+
+    const cleanedOf = (raw) => raw.toLowerCase()
+      .replace(/\.[a-z0-9]+$/i, '')        // 去扩展名
+      .replace(/^[\d_\-\s]+/, '')          // 去开头序号
+      .replace(/[_\-\s]+/g, '|')           // 把分隔符统一成 |
+      .replace(/^\||\|$/g, '')             // 去首尾的 |
+      .trim();
+
+    // 严格命中:cleaned 拆出的所有 token 里有一个 == name,或 aliases 里命中
+    const strictMatch = (r) => {
+      const cleaned = cleanedOf(r.name || '');
+      if (cleaned) {
+        const tokens = cleaned.split('|').filter(Boolean);
+        if (tokens.includes(normName)) return true;
+        // 也允许 cleaned 整体 == name(没有分隔符的情况)
+        if (cleaned === normName) return true;
+      }
+      const aliases = Array.isArray(r.aliases) ? r.aliases : [];
+      for (const a of aliases) {
+        if ((a || '').toLowerCase().trim() === normName) return true;
+      }
+      return false;
+    };
+
+    // 宽松 fallback:cleaned 包含 normName(单向,比 6.2 严)
+    // 不允许 normName 反向 includes cleaned —— 这就避免 name="林" 命中 "林默"/"林渊"
+    const looseMatch = (r) => {
+      const cleaned = cleanedOf(r.name || '');
+      if (!cleaned) return false;
+      if (normName.length < 2) return false;
+      return cleaned.includes(normName);
+    };
+
     const hits = [];
     for (const r of S.roleImages) {
-      const raw = (r.name || '').toLowerCase();
-      const cleaned = raw
-        .replace(/\.[a-z0-9]+$/i, '')
-        .replace(/^[\d_\-\s]+/, '')
-        .replace(/[_\-\s]+/g, '')
-        .trim();
-      if (!cleaned) continue;
-      if (cleaned.includes(normName) || normName.includes(cleaned)) {
-        hits.push(r.id);
+      if (excluded.has(r.id)) continue;
+      if (strictMatch(r)) hits.push(r.id);
+    }
+    // 严格 0 命中时,做一次"文件名包含名字"的 fallback(单向)
+    // 非严格模式则把宽松命中也铺出来
+    if (hits.length === 0) {
+      for (const r of S.roleImages) {
+        if (excluded.has(r.id)) continue;
+        if (looseMatch(r)) hits.push(r.id);
+      }
+    } else if (!strict) {
+      for (const r of S.roleImages) {
+        if (excluded.has(r.id)) continue;
+        if (hits.includes(r.id)) continue;
+        if (looseMatch(r)) hits.push(r.id);
       }
     }
     return hits;
@@ -1221,15 +1450,31 @@
   }
 
   function recomputeProjectMatches() {
-    projectExtractedNames = extractNamesFromScript(S.projectScript || '').map(n => ({
+    // ★ v6.3.0 拉黑过滤 + 禁用过滤
+    const blacklist = new Set(S.projectNameBlacklist || []);
+    const disabled  = new Set(S.projectNameDisabled  || []);
+    const allNames = extractNamesFromScript(S.projectScript || '')
+      .filter(n => !blacklist.has(n.name));
+    projectExtractedNames = allNames.map(n => ({
       ...n,
-      matchedRoleIds: fuzzyMatchRoles(n.name)
+      disabled: disabled.has(n.name),
+      matchedRoleIds: disabled.has(n.name) ? [] : fuzzyMatchRoles(n.name)
     }));
+    // 自动剪枝:禁用列表里只保留当前剧本仍存在的名字(避免僵尸数据)
+    const presentNames = new Set(allNames.map(n => n.name));
+    S.projectNameDisabled = (S.projectNameDisabled || []).filter(n => presentNames.has(n));
     const seen = new Set();
     const merged = [];
     for (const n of projectExtractedNames) {
       for (const id of n.matchedRoleIds) {
         if (!seen.has(id)) { seen.add(id); merged.push(id); }
+      }
+    }
+    // ★ v6.3.0 把用户手动添加的角色图也合进来(去重 + 校验存在)
+    for (const id of (S.projectManualRoleIds || [])) {
+      if (!seen.has(id) && S.roleImages.some(r => r.id === id)) {
+        seen.add(id);
+        merged.push(id);
       }
     }
     S.projectMatchedIds = merged;
@@ -1488,10 +1733,19 @@
           <div class="ls-section">
             <div class="ls-section-title">🖼 自动勾选的角色图<span id="ls-proj-hit-count" style="font-size:9px;color:var(--p-muted);font-weight:normal;letter-spacing:0;text-transform:none;margin-left:4px;">(0)</span></div>
             <div id="ls-proj-matched-grid"></div>
+            <div id="ls-proj-excluded-row" class="empty"></div>
             <div class="ls-btn-row" style="margin-top:6px;">
               <button class="ls-btn" id="ls-btn-proj-rematch">🔄 重新匹配</button>
               <button class="ls-btn" id="ls-btn-proj-sel-all-hit">全选命中</button>
               <button class="ls-btn" id="ls-btn-proj-sel-none">全不选</button>
+              <button class="ls-btn" id="ls-btn-proj-manual-add" title="弹出角色库选择器,手动多选">＋ 从角色库添加</button>
+            </div>
+            <div class="ls-row ls-toggle-wrap" style="margin:6px 2px 2px;">
+              <label class="ls-toggle">
+                <input type="checkbox" id="ls-proj-strict-toggle" ${S.projectMatchStrict !== false ? 'checked' : ''} />
+                <span class="ls-toggle-slider"></span>
+              </label>
+              <span style="font-size:10px;color:var(--p-muted)">严格匹配(文件名/别名 == 人名才命中,避免「林渊」误中「林默」)</span>
             </div>
           </div>
 
@@ -2082,14 +2336,28 @@
         const num = orderMap.get(r.id);
         const numBadge = (sel && S.roleSelectedIds.length > 1)
           ? `<div class="ls-role-thumb-num">${num}</div>` : '';
-        return `<div class="ls-role-thumb ${sel}" data-id="${r.id}" title="${escHtml(r.name)}">
+        // ★ v6.3.0 别名角标 + ✏ 编辑按钮
+        const aliasCount = Array.isArray(r.aliases) ? r.aliases.length : 0;
+        const aliasBadge = aliasCount > 0
+          ? `<div class="ls-role-thumb-alias" title="别名: ${escHtml((r.aliases || []).join(', '))}">别名×${aliasCount}</div>`
+          : '';
+        const editBtn = `<div class="ls-role-thumb-edit" data-act="edit-alias" title="编辑这张图的别名(用于剧本匹配)">✏</div>`;
+        return `<div class="ls-role-thumb ${sel}" data-id="${r.id}" title="${escHtml(r.name)}${aliasCount ? ' · 别名: ' + escHtml((r.aliases || []).join(', ')) : ''}">
           <img src="${r.dataUrl}" loading="lazy" />
           ${numBadge}
+          ${aliasBadge}
+          ${editBtn}
           <div class="ls-role-thumb-name">${escHtml(r.name)}</div>
         </div>`;
       }).join('');
       grid.querySelectorAll('.ls-role-thumb').forEach(el => {
-        el.onclick = () => {
+        el.onclick = (ev) => {
+          // ★ v6.3.0 ✏ 按钮:打开别名编辑弹窗
+          if (ev.target.classList.contains('ls-role-thumb-edit')) {
+            ev.stopPropagation();
+            openAliasEditor(el.dataset.id);
+            return;
+          }
           const id = el.dataset.id;
           const idx = S.roleSelectedIds.indexOf(id);
           if (idx >= 0) S.roleSelectedIds.splice(idx, 1);
@@ -2210,6 +2478,24 @@
       renderProjectMatchedGrid();
       renderProjectStats();
     };
+
+    // ★ v6.3.0 「+ 从角色库添加」按钮:打开多选弹窗
+    const manualAddBtn = panel.querySelector('#ls-btn-proj-manual-add');
+    if (manualAddBtn) {
+      manualAddBtn.onclick = () => openManualRolePicker();
+    }
+
+    // ★ v6.3.0 严格匹配开关
+    const strictTog = panel.querySelector('#ls-proj-strict-toggle');
+    if (strictTog) {
+      strictTog.addEventListener('change', () => {
+        S.projectMatchStrict = !!strictTog.checked;
+        save();
+        recomputeProjectMatches();
+        renderProjectAll();
+        showToast(strictTog.checked ? '✓ 严格匹配已启用' : '⚠ 严格匹配已关闭(回到 6.2 双向 includes)');
+      });
+    }
 
     // ── ★ v6.2.0 分段事件 ──
     const targetLenEl = panel.querySelector('#ls-proj-target-len');
@@ -2400,7 +2686,7 @@
     const exportData = {
       _meta: {
         app: '乔大仙·全能助手',
-        version: '6.2.0',
+        version: '6.3.0',
         exportedAt: new Date().toISOString(),
         includeRoleImages: !!includeRoleImages,
       },
@@ -2432,6 +2718,13 @@
       projectTargetLen:    S.projectTargetLen,
       projectOverlapChars: S.projectOverlapChars,
       projectShowSegPanel: S.projectShowSegPanel,
+
+      // ★ v6.3.0 人名/匹配手动控制
+      projectNameBlacklist:   S.projectNameBlacklist   || [],
+      projectExcludedRoleIds: S.projectExcludedRoleIds || [],
+      projectManualRoleIds:   S.projectManualRoleIds   || [],
+      projectMatchStrict:     S.projectMatchStrict !== false,
+      // 注:projectNameDisabled 是临时状态,不导出
 
       // UI 设置
       activeTab: S.activeTab,
@@ -2511,7 +2804,28 @@
 
     // 角色库(若导出时未带角色图,这里就是空数组,不会清掉旧的)
     if (Array.isArray(data.roleImages) && data.roleImages.length > 0) {
+      // ★ v6.3.0 别名合并:导入数据 + 本地数据的 aliases 取并集,避免互覆盖丢别名
+      const localAliasMap = new Map();
+      (S.roleImages || []).forEach(r => {
+        if (r && r.id && Array.isArray(r.aliases) && r.aliases.length) {
+          localAliasMap.set(r.id, r.aliases.slice());
+        }
+      });
       S.roleImages = mergeArrayById(S.roleImages, data.roleImages);
+      S.roleImages.forEach(r => {
+        if (!Array.isArray(r.aliases)) r.aliases = [];
+        const local = localAliasMap.get(r.id);
+        if (local && local.length) {
+          // 合并去重(忽略大小写)
+          const seen = new Set(r.aliases.map(a => (a || '').toLowerCase().trim()));
+          for (const a of local) {
+            const k = (a || '').toLowerCase().trim();
+            if (!k || seen.has(k)) continue;
+            seen.add(k);
+            r.aliases.push(a);
+          }
+        }
+      });
     }
     if (Array.isArray(data.roleSelectedIds) && data.roleSelectedIds.length > 0) {
       // 校验 id 真实存在
@@ -2534,6 +2848,27 @@
     if (typeof data.projectTargetLen === 'number')    S.projectTargetLen = data.projectTargetLen;
     if (typeof data.projectOverlapChars === 'number') S.projectOverlapChars = data.projectOverlapChars;
     if (typeof data.projectShowSegPanel === 'boolean') S.projectShowSegPanel = data.projectShowSegPanel;
+
+    // ★ v6.3.0 人名/匹配手动控制
+    if (Array.isArray(data.projectNameBlacklist)) {
+      // 用 unique 合并(避免覆盖本机已拉黑)
+      const set = new Set([...(S.projectNameBlacklist || []), ...data.projectNameBlacklist]);
+      S.projectNameBlacklist = [...set];
+    }
+    if (Array.isArray(data.projectExcludedRoleIds)) {
+      // 排除项也合并 + 校验 id 真实存在
+      const set = new Set([...(S.projectExcludedRoleIds || []), ...data.projectExcludedRoleIds]);
+      S.projectExcludedRoleIds = [...set].filter(id =>
+        S.roleImages.some(r => r.id === id)
+      );
+    }
+    if (Array.isArray(data.projectManualRoleIds)) {
+      const set = new Set([...(S.projectManualRoleIds || []), ...data.projectManualRoleIds]);
+      S.projectManualRoleIds = [...set].filter(id =>
+        S.roleImages.some(r => r.id === id)
+      );
+    }
+    if (typeof data.projectMatchStrict === 'boolean') S.projectMatchStrict = data.projectMatchStrict;
 
     // UI
     if (typeof data.activeTab === 'string') S.activeTab = data.activeTab;
@@ -2633,29 +2968,117 @@
   function renderProjectNames() {
     const wrap = document.getElementById('ls-proj-names');
     if (!wrap) return;
-    if (!projectExtractedNames.length) {
+    const blacklist = S.projectNameBlacklist || [];
+    const hasBL = blacklist.length > 0;
+
+    if (!projectExtractedNames.length && !hasBL) {
       wrap.innerHTML = `<div style="color:var(--p-muted);font-size:10.5px;padding:10px 4px;line-height:1.6;">
         ${S.projectScript ? '没识别到角色名(剧本可能太短或没有典型人名结构)' : '上传或粘贴剧本后,人名会自动出现在这里'}
       </div>`;
       return;
     }
-    wrap.innerHTML = projectExtractedNames.map(n => {
+
+    const chipsHtml = projectExtractedNames.map(n => {
       const matched = n.matchedRoleIds.length > 0;
-      const cls = matched ? 'matched' : 'unmatched';
-      const icon = matched ? '✓' : '○';
-      return `<span class="ls-proj-name-chip ${cls}" data-name="${escHtml(n.name)}" title="出现 ${n.count} 次,匹配到 ${n.matchedRoleIds.length} 张图">
+      const isDisabled = !!n.disabled;
+      let cls;
+      if (isDisabled) cls = 'disabled';
+      else if (matched) cls = 'matched';
+      else cls = 'unmatched';
+      const icon = isDisabled ? '⊘' : (matched ? '✓' : '○');
+      const titleAttr = isDisabled
+        ? `已禁用 · 出现 ${n.count} 次 · 点击重新启用 · 长按复制名字`
+        : `出现 ${n.count} 次 · 匹配到 ${n.matchedRoleIds.length} 张图 · 点击禁用 · × 永久拉黑 · 长按复制`;
+      return `<span class="ls-proj-name-chip ${cls}" data-name="${escHtml(n.name)}" title="${escHtml(titleAttr)}">
         <span class="chip-icon">${icon}</span>
         <span>${escHtml(n.name)}</span>
         <span class="chip-count">×${n.count}</span>
+        <span class="chip-x" data-act="del" title="永久拉黑这个名字">×</span>
       </span>`;
     }).join('');
+
+    const blHtml = hasBL ? `
+      <div id="ls-proj-blacklist-row">
+        <span class="bl-label">🚫 已拉黑(点击恢复):</span>
+        ${blacklist.map(name => `
+          <span class="bl-chip" data-name="${escHtml(name)}" title="点击移出黑名单">
+            ${escHtml(name)}<span class="bl-restore">↩</span>
+          </span>
+        `).join('')}
+      </div>
+    ` : '';
+
+    wrap.innerHTML = chipsHtml + blHtml;
+
+    // 主 chip:点击切换启用/禁用,× 删除拉黑,长按复制
     wrap.querySelectorAll('.ls-proj-name-chip').forEach(el => {
+      let pressTimer = null;
+      let longPressed = false;
+
+      const startPress = () => {
+        longPressed = false;
+        pressTimer = setTimeout(() => {
+          longPressed = true;
+          const name = el.dataset.name;
+          navigator.clipboard.writeText(name).then(
+            () => showToast(`✓ 已复制「${name}」`),
+            () => showToast('复制失败')
+          );
+        }, 600);
+      };
+      const cancelPress = () => {
+        if (pressTimer) { clearTimeout(pressTimer); pressTimer = null; }
+      };
+
+      el.addEventListener('mousedown',  startPress);
+      el.addEventListener('touchstart', startPress, { passive: true });
+      el.addEventListener('mouseup',    cancelPress);
+      el.addEventListener('mouseleave', cancelPress);
+      el.addEventListener('touchend',   cancelPress);
+      el.addEventListener('touchcancel',cancelPress);
+
+      el.addEventListener('click', (ev) => {
+        if (longPressed) { longPressed = false; return; }
+        // × 按钮:永久拉黑
+        if (ev.target.classList.contains('chip-x')) {
+          ev.stopPropagation();
+          const name = el.dataset.name;
+          if (!S.projectNameBlacklist.includes(name)) {
+            S.projectNameBlacklist.push(name);
+          }
+          // 也从禁用列表里清掉(避免冗余状态)
+          const di = S.projectNameDisabled.indexOf(name);
+          if (di >= 0) S.projectNameDisabled.splice(di, 1);
+          save();
+          recomputeProjectMatches();
+          renderProjectAll();
+          showToast(`🚫 已拉黑「${name}」`);
+          return;
+        }
+        // 主体:切换启用/禁用
+        const name = el.dataset.name;
+        const di = S.projectNameDisabled.indexOf(name);
+        if (di >= 0) {
+          S.projectNameDisabled.splice(di, 1);
+        } else {
+          S.projectNameDisabled.push(name);
+        }
+        save();
+        recomputeProjectMatches();
+        renderProjectAll();
+      });
+    });
+
+    // 黑名单 chip:点击恢复
+    wrap.querySelectorAll('.bl-chip').forEach(el => {
       el.onclick = () => {
         const name = el.dataset.name;
-        navigator.clipboard.writeText(name).then(
-          () => showToast(`✓ 已复制「${name}」`),
-          () => showToast('复制失败')
-        );
+        const idx = S.projectNameBlacklist.indexOf(name);
+        if (idx >= 0) S.projectNameBlacklist.splice(idx, 1);
+        save();
+        recomputeProjectMatches();
+        renderProjectAll();
+        showToast(`↩ 已恢复「${name}」`);
       };
     });
   }
@@ -2667,37 +3090,233 @@
       grid.innerHTML = `<div class="ls-role-empty-grid" style="grid-column:1/-1;">角色库还是空的<br>去「角色库」tab 先导入图片</div>`;
       return;
     }
+    const excluded = new Set(S.projectExcludedRoleIds || []);
     const allMatched = new Set();
     projectExtractedNames.forEach(n => n.matchedRoleIds.forEach(id => allMatched.add(id)));
     S.projectMatchedIds.forEach(id => allMatched.add(id));
-    const showIds = [...allMatched];
+    // 永久排除的图不在主网格里展示
+    const showIds = [...allMatched].filter(id => !excluded.has(id));
 
     if (!showIds.length) {
-      grid.innerHTML = `<div class="ls-role-empty-grid" style="grid-column:1/-1;">还没匹配到任何角色图<br><span style="font-size:9.5px;opacity:0.7;">提示:角色库的文件名要包含人名,比如 <code>张三.png</code> 或 <code>01_张三_背面.png</code></span></div>`;
-      return;
+      grid.innerHTML = `<div class="ls-role-empty-grid" style="grid-column:1/-1;">还没匹配到任何角色图<br><span style="font-size:9.5px;opacity:0.7;">提示:严格匹配模式下,文件名要 == 人名(或加别名)。点下方「+ 从角色库添加」手动选。</span></div>`;
+    } else {
+      grid.innerHTML = showIds.map(id => {
+        const r = S.roleImages.find(x => x.id === id);
+        if (!r) return '';
+        const sel = S.projectMatchedIds.includes(id);
+        return `<div class="ls-proj-mthumb ${sel ? 'selected' : ''}" data-id="${id}" title="${escHtml(r.name)} · 点击切换勾选 · × 永久排除自动匹配">
+          <img src="${r.dataUrl}" loading="lazy" />
+          <span class="ls-proj-mthumb-x" data-act="exclude" title="永久排除这张图不让它再被自动匹配">×</span>
+          <div class="ls-proj-mthumb-name">${escHtml(r.name)}</div>
+        </div>`;
+      }).join('');
+
+      grid.querySelectorAll('.ls-proj-mthumb').forEach(el => {
+        el.onclick = (ev) => {
+          const id = el.dataset.id;
+          if (ev.target.classList.contains('ls-proj-mthumb-x')) {
+            ev.stopPropagation();
+            // 永久排除 + 立刻去掉勾选 + 也从手动添加里清掉
+            if (!S.projectExcludedRoleIds.includes(id)) {
+              S.projectExcludedRoleIds.push(id);
+            }
+            const mi = S.projectManualRoleIds.indexOf(id);
+            if (mi >= 0) S.projectManualRoleIds.splice(mi, 1);
+            const xi = S.projectMatchedIds.indexOf(id);
+            if (xi >= 0) S.projectMatchedIds.splice(xi, 1);
+            save();
+            recomputeProjectMatches();
+            renderProjectMatchedGrid();
+            renderProjectStats();
+            const r = S.roleImages.find(x => x.id === id);
+            showToast(`🚫 已排除「${(r && r.name) || '该图'}」`);
+            return;
+          }
+          // 普通点击:切换勾选
+          const idx = S.projectMatchedIds.indexOf(id);
+          if (idx >= 0) S.projectMatchedIds.splice(idx, 1);
+          else          S.projectMatchedIds.push(id);
+          save();
+          renderProjectMatchedGrid();
+          renderProjectStats();
+        };
+      });
     }
 
-    grid.innerHTML = showIds.map(id => {
-      const r = S.roleImages.find(x => x.id === id);
-      if (!r) return '';
-      const sel = S.projectMatchedIds.includes(id);
-      return `<div class="ls-proj-mthumb ${sel ? 'selected' : ''}" data-id="${id}" title="${escHtml(r.name)}">
-        <img src="${r.dataUrl}" loading="lazy" />
-        <div class="ls-proj-mthumb-name">${escHtml(r.name)}</div>
-      </div>`;
-    }).join('');
+    // 排除列表展示:让用户能恢复
+    const excludedRow = document.getElementById('ls-proj-excluded-row');
+    if (excludedRow) {
+      const exIds = (S.projectExcludedRoleIds || []).filter(id =>
+        S.roleImages.some(r => r.id === id)
+      );
+      if (!exIds.length) {
+        excludedRow.classList.add('empty');
+        excludedRow.innerHTML = '';
+      } else {
+        excludedRow.classList.remove('empty');
+        excludedRow.innerHTML = `
+          <span class="bl-label">🚫 已排除(点击恢复):</span>
+          ${exIds.map(id => {
+            const r = S.roleImages.find(x => x.id === id);
+            const nm = r ? r.name : id;
+            return `<span class="bl-chip" data-id="${id}" title="点击移出排除列表">
+              ${escHtml(nm)}<span class="bl-restore">↩</span>
+            </span>`;
+          }).join('')}
+        `;
+        excludedRow.querySelectorAll('.bl-chip').forEach(el => {
+          el.onclick = () => {
+            const id = el.dataset.id;
+            const idx = S.projectExcludedRoleIds.indexOf(id);
+            if (idx >= 0) S.projectExcludedRoleIds.splice(idx, 1);
+            save();
+            recomputeProjectMatches();
+            renderProjectMatchedGrid();
+            renderProjectStats();
+            const r = S.roleImages.find(x => x.id === id);
+            showToast(`↩ 已恢复「${(r && r.name) || id}」`);
+          };
+        });
+      }
+    }
+  }
 
-    grid.querySelectorAll('.ls-proj-mthumb').forEach(el => {
-      el.onclick = () => {
-        const id = el.dataset.id;
-        const idx = S.projectMatchedIds.indexOf(id);
-        if (idx >= 0) S.projectMatchedIds.splice(idx, 1);
-        else          S.projectMatchedIds.push(id);
-        save();
-        renderProjectMatchedGrid();
-        renderProjectStats();
-      };
-    });
+  // ★ v6.3.0 从角色库手动添加角色图(弹窗多选)
+  function openManualRolePicker() {
+    if (!S.roleImages.length) {
+      showToast('角色库为空,先去「角色库」tab 导入');
+      return;
+    }
+    document.getElementById('ls-proj-manual-picker')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'ls-proj-manual-picker';
+    overlay.className = 'ls-modal-overlay';
+    const tempSel = new Set(S.projectMatchedIds);
+    overlay.innerHTML = `
+      <div class="ls-modal">
+        <div class="ls-modal-title">＋ 从角色库手动添加</div>
+        <div class="ls-modal-sub">点击缩略图勾选/取消 · 已勾选的会带金边 · 红框是已排除自动匹配的图</div>
+        <div class="ls-modal-grid"></div>
+        <div class="ls-modal-actions">
+          <button class="ls-btn" id="ls-proj-manual-cancel">取消</button>
+          <button class="ls-btn primary" id="ls-proj-manual-ok">确认</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const renderGrid = () => {
+      const g = overlay.querySelector('.ls-modal-grid');
+      g.innerHTML = S.roleImages.map(r => {
+        const isSel = tempSel.has(r.id);
+        const isExcluded = (S.projectExcludedRoleIds || []).includes(r.id);
+        return `<div class="ls-proj-mthumb ${isSel ? 'selected' : ''}"
+                     data-id="${r.id}"
+                     style="${isExcluded ? 'outline:1px dashed rgba(180,80,80,0.6);' : ''}"
+                     title="${escHtml(r.name)}${isExcluded ? '(已排除自动匹配)' : ''}">
+          <img src="${r.dataUrl}" loading="lazy" />
+          <div class="ls-proj-mthumb-name">${escHtml(r.name)}</div>
+        </div>`;
+      }).join('');
+      g.querySelectorAll('.ls-proj-mthumb').forEach(el => {
+        el.onclick = () => {
+          const id = el.dataset.id;
+          if (tempSel.has(id)) tempSel.delete(id);
+          else                 tempSel.add(id);
+          renderGrid();
+        };
+      });
+    };
+    renderGrid();
+
+    overlay.querySelector('#ls-proj-manual-cancel').onclick = () => overlay.remove();
+    overlay.querySelector('#ls-proj-manual-ok').onclick = () => {
+      // tempSel 是新的"勾选集"。差集分两类:
+      //  - 自动命中且仍勾选 → 留在 projectMatchedIds
+      //  - 用户手动新加的 id → 同时进 projectManualRoleIds(下次 recompute 也保留)
+      const autoHits = new Set();
+      projectExtractedNames.forEach(n => n.matchedRoleIds.forEach(id => autoHits.add(id)));
+
+      const newManual = [];
+      const newMatched = [];
+      tempSel.forEach(id => {
+        if (!S.roleImages.some(r => r.id === id)) return;
+        newMatched.push(id);
+        if (!autoHits.has(id)) newManual.push(id);
+      });
+      S.projectMatchedIds = newMatched;
+      S.projectManualRoleIds = newManual;
+      save();
+      renderProjectMatchedGrid();
+      renderProjectStats();
+      overlay.remove();
+      showToast(`✓ 已勾选 ${newMatched.length} 张(其中手动 ${newManual.length})`);
+    };
+
+    // 点遮罩关闭
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  }
+
+  // ★ v6.3.0 编辑角色图的别名(用于剧本匹配)
+  function openAliasEditor(roleId) {
+    const r = S.roleImages.find(x => x.id === roleId);
+    if (!r) { showToast('找不到这张角色图'); return; }
+    if (!Array.isArray(r.aliases)) r.aliases = [];
+
+    document.getElementById('ls-proj-alias-editor')?.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'ls-proj-alias-editor';
+    overlay.className = 'ls-modal-overlay';
+    overlay.innerHTML = `
+      <div class="ls-modal">
+        <div class="ls-modal-title">✏ 编辑别名 · ${escHtml(r.name)}</div>
+        <div class="ls-modal-sub">每行一个别名 · 用于剧本匹配 · 严格匹配下别名必须完全相同</div>
+        <div style="display:flex;align-items:center;gap:10px;background:rgba(0,0,0,0.3);padding:8px;border-radius:6px;">
+          <img src="${r.dataUrl}" style="width:60px;height:60px;object-fit:cover;border-radius:4px;border:1px solid var(--p-border);" />
+          <div style="font-size:10px;color:var(--p-muted);font-family:'JetBrains Mono',monospace;line-height:1.6;">
+            <div>文件名: <span style="color:var(--p-gold2)">${escHtml(r.name)}</span></div>
+            <div style="opacity:0.7;margin-top:3px;">举例:文件名「林渊.png」,在剧本里也想让「小渊」「阿渊」命中,就在下面加上这两个别名</div>
+          </div>
+        </div>
+        <textarea id="ls-alias-textarea" placeholder="一行一个别名,如:&#10;小渊&#10;阿渊&#10;渊哥">${escHtml((r.aliases || []).join('\n'))}</textarea>
+        <div class="ls-modal-actions">
+          <button class="ls-btn" id="ls-alias-cancel">取消</button>
+          <button class="ls-btn primary" id="ls-alias-save">💾 保存</button>
+        </div>
+      </div>
+    `;
+    document.body.appendChild(overlay);
+
+    const ta = overlay.querySelector('#ls-alias-textarea');
+    setTimeout(() => ta && ta.focus(), 50);
+
+    overlay.querySelector('#ls-alias-cancel').onclick = () => overlay.remove();
+    overlay.querySelector('#ls-alias-save').onclick = () => {
+      const lines = ta.value.split(/\r?\n/)
+        .map(s => s.trim())
+        .filter(Boolean);
+      // 去重(保留顺序)
+      const seen = new Set();
+      const uniq = [];
+      for (const a of lines) {
+        const k = a.toLowerCase();
+        if (seen.has(k)) continue;
+        seen.add(k);
+        uniq.push(a);
+      }
+      r.aliases = uniq;
+      save();
+      // 重新匹配 + 重画相关 UI
+      recomputeProjectMatches();
+      renderRoleImage();
+      // 项目 tab 也可能需要更新
+      if (typeof renderProjectAll === 'function') renderProjectAll();
+      overlay.remove();
+      showToast(`✓ 已保存 ${uniq.length} 个别名`);
+    };
+    overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
   }
 
   // ★ v6.0.1 渲染下拉选项
